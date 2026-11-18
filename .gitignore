@@ -1,0 +1,25 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# 数据与产物：可重建，不进仓库（7 天运行库约几百 MB，且含真实房间数据）
+data/*.db
+data/*.db-journal
+data/*.sqlite3
+*.log
+logs/
+
+# 密钥：钉钉 Webhook、WiFi 密码，绝对不能进仓库
+.env
+config.local.*
+secrets.h
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini
+.DS_Store

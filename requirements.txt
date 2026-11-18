@@ -1,0 +1,19 @@
+# 顶层依赖：锁到 2026-11-18 在这台机器上实测通过的版本
+#
+# 为什么锁死到具体版本（不是 >=）：
+#   1. 这个项目要连跑 7 天、还要给别人演示，依赖一变就白跑。锁版本 = 可复现。
+#   2. 有些包的大版本会改 API。典型例子：paho-mqtt 2.x 把 mqtt.Client() 的第一个参数
+#      改成了 callback_api_version，网上 90% 的教程还是 1.x 的写法，直接抄会报错。
+#   3. 面试问"怎么保证别人也能跑起来"，答案就是这一行行 ==。
+
+fastapi==0.163.1
+uvicorn[standard]==0.54.0
+paho-mqtt==2.2.0
+SQLAlchemy==2.1.9
+pandas==3.1.1
+streamlit==1.67.0
+requests==2.34.2
+
+# 环境：Python 3.13.17 / Windows 11 / 2026-11-18 实测
+# 完整锁定（含所有间接依赖）用：.\.venv\Scripts\python.exe -m pip freeze > requirements.lock.txt
+# lock 文件在阶段 7 部署时生成，用来对照"新机器装出来的版本是否一致"。
