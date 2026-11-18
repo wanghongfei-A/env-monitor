@@ -1,0 +1,4 @@
+# 统一换行符：仓库里一律存 LF，Windows 检出时不再反复提示 "LF will be replaced by CRLF"
+# 为什么要有这个文件：Windows 默认 core.autocrlf=true，会把 LF 改成 CRLF 再存回去，
+# 结果同一份文件在不同机器上 diff 出一堆"整行改动"。一行配置能省掉以后所有的假 diff。
+* text=auto eol=lf
