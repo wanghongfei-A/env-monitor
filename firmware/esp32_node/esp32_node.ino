@@ -4,6 +4,8 @@
 #include <Wire.h>
 #include <BH1750.h>
 #include "DHT.h"
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
 #include "secrets.h"
 
 #define DHTPIN      4
@@ -14,17 +16,20 @@
 #define LED_G       26
 #define LED_R       27
 #define BUZZER      25
-#define TEMP_ALARM  32.0      // 测试用！验证完改成 32.0（与需求说明 R1 一致）
+#define TEMP_ALARM  32.0      // R1 过热阈值，与需求说明一致
 
 DHT dht(DHTPIN, DHTTYPE);
 BH1750 lightMeter;
+Adafruit_SSD1306 display(128, 64, &Wire, -1);
+bool oledOk = false;
 
 WiFiClient net;
 MQTTClient client(512);
 String topic;
 
-unsigned long lastReport = 0;
-unsigned long lastTry    = 0;
+unsigned long lastReport  = 0;
+unsigned long lastTry     = 0;
+unsigned long lastWifiTry = 0;
 bool lastHot = false;
 
 // ---------- 环形缓冲 ----------
@@ -53,6 +58,38 @@ void flushBuffer() {
     delay(20);
   }
   Serial.printf("[FLUSH] 结束，剩余 %d 条\n", bufCount);
+}
+
+// ---------- OLED ----------
+void drawScreen(float t, float h, float lux) {
+  if (!oledOk) return;
+
+  char l1[24], l2[24], l3[24];
+  snprintf(l1, sizeof(l1), "T %.1fC   H %.1f%%", t, h);
+  snprintf(l2, sizeof(l2), "Lux %.0f", lux);
+  snprintf(l3, sizeof(l3), "buf %d/%d", bufCount, BUF_SIZE);
+
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+
+  display.setCursor(0, 0);
+  display.print("node01 ");
+  display.print(WiFi.status() == WL_CONNECTED ? "WiFi OK" : "WiFi --");
+
+  display.setCursor(0, 16);
+  display.print(l1);
+
+  display.setCursor(0, 28);
+  display.print(l2);
+
+  display.setCursor(0, 40);
+  display.print(client.connected() ? "MQTT OK" : "MQTT --");
+
+  display.setCursor(0, 52);
+  display.print(l3);
+
+  display.display();
 }
 
 // ---------- WiFi / NTP ----------
@@ -108,14 +145,21 @@ String uuid4() {
   return String(s);
 }
 
-// ---------- 非阻塞重连 ----------
+// ---------- 连接维护 ----------
 void ensureConnected() {
   if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("[WiFi] lost, reconnect");
-    WiFi.reconnect();
-    delay(1000);
+    // WiFi.reconnect() 在 ESP32 上不可靠：热点短暂消失后可能永远连不回来。
+    // 改用 disconnect + begin 重新发起，并限流到每 10 秒一次。
+    if (millis() - lastWifiTry > 10000) {
+      lastWifiTry = millis();
+      Serial.println("[WiFi] reconnect (disconnect+begin)");
+      WiFi.disconnect();
+      delay(100);
+      WiFi.begin(WIFI_SSID, WIFI_PASS);
+    }
     return;
   }
+
   if (client.connected()) return;
   if (millis() - lastTry < 5000) return;
   lastTry = millis();
@@ -133,21 +177,35 @@ void setup() {
   Serial.begin(115200);
   delay(300);
   Serial.println();
-  Serial.println("=== 3.6 firmware (buffer + LED + buzzer) ===");
+  Serial.println("=== firmware: sensors + buffer + LED + buzzer + OLED ===");
 
   pinMode(LED_G, OUTPUT);
   pinMode(LED_R, OUTPUT);
   pinMode(BUZZER, OUTPUT);
   digitalWrite(LED_R, LOW);
   digitalWrite(BUZZER, LOW);
-  digitalWrite(LED_G, HIGH);          // 上电即绿灯 = 正常运行
+  digitalWrite(LED_G, HIGH);
+
+  Wire.begin(21, 22);
+
+  oledOk = display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
+  if (oledOk) {
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(0, 0);
+    display.println("env-monitor booting...");
+    display.display();
+    Serial.println("OLED ok (0x3C)");
+  } else {
+    Serial.println("OLED init FAILED (try 0x3D)");
+  }
+
+  dht.begin();
+  lightMeter.begin();
 
   connectWiFi();
   syncTime();
-
-  dht.begin();
-  Wire.begin(21, 22);
-  lightMeter.begin();
 
   topic = String("iot/") + NODE_ID + "/data";
   client.begin(MQTT_HOST, MQTT_PORT, net);
@@ -180,7 +238,6 @@ void loop() {
     return;
   }
 
-  // ---- 本地告警：断网时云端判不了，蜂鸣器是唯一还能报警的通道 ----
   bool hot = (t > TEMP_ALARM);
   digitalWrite(LED_R, hot ? HIGH : LOW);
   digitalWrite(LED_G, hot ? LOW  : HIGH);
@@ -191,6 +248,8 @@ void loop() {
     if (hot) Serial.printf("[ALARM] ON   t=%.1f > %.1f\n", t, TEMP_ALARM);
     else     Serial.println("[ALARM] OFF");
   }
+
+  drawScreen(t, h, lux);
 
   String payload = String("{\"id\":\"") + uuid4()
                  + "\",\"ts\":\"" + isoNow()
