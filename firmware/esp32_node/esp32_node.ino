@@ -6,9 +6,15 @@
 #include "DHT.h"
 #include "secrets.h"
 
-#define DHTPIN     4
-#define DHTTYPE    DHT22
-#define REPORT_MS  10000        // 10 秒一采一报
+#define DHTPIN      4
+#define DHTTYPE     DHT22
+#define REPORT_MS   10000
+#define BUF_SIZE    200
+
+#define LED_G       26
+#define LED_R       27
+#define BUZZER      25
+#define TEMP_ALARM  32.0      // 测试用！验证完改成 32.0（与需求说明 R1 一致）
 
 DHT dht(DHTPIN, DHTTYPE);
 BH1750 lightMeter;
@@ -16,9 +22,40 @@ BH1750 lightMeter;
 WiFiClient net;
 MQTTClient client(512);
 String topic;
-unsigned long lastReport = 0;
 
-// ---------- WiFi ----------
+unsigned long lastReport = 0;
+unsigned long lastTry    = 0;
+bool lastHot = false;
+
+// ---------- 环形缓冲 ----------
+String buf[BUF_SIZE];
+int    bufHead  = 0;
+int    bufCount = 0;
+
+void bufPush(const String &s) {
+  buf[bufHead] = s;
+  bufHead = (bufHead + 1) % BUF_SIZE;
+  if (bufCount < BUF_SIZE) bufCount++;
+  Serial.printf("[BUF] %d/%d\n", bufCount, BUF_SIZE);
+}
+
+int bufOldest() {
+  return (bufHead - bufCount + BUF_SIZE) % BUF_SIZE;
+}
+
+void flushBuffer() {
+  if (bufCount == 0) return;
+  Serial.printf("[FLUSH] 开始补发 %d 条\n", bufCount);
+  while (bufCount > 0 && client.connected()) {
+    int i = bufOldest();
+    if (!client.publish(topic, buf[i], false, 1)) break;
+    bufCount--;
+    delay(20);
+  }
+  Serial.printf("[FLUSH] 结束，剩余 %d 条\n", bufCount);
+}
+
+// ---------- WiFi / NTP ----------
 bool connectWiFi() {
   Serial.print("WiFi");
   WiFi.mode(WIFI_STA);
@@ -36,7 +73,6 @@ bool connectWiFi() {
   return false;
 }
 
-// ---------- NTP ----------
 bool syncTime() {
   configTime(8 * 3600, 0, "ntp.aliyun.com", "cn.pool.ntp.org");
   Serial.print("NTP");
@@ -51,21 +87,19 @@ bool syncTime() {
 String isoNow() {
   struct tm t;
   if (!getLocalTime(&t, 1000)) return String("(no time)");
-  char buf[32];
-  strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", &t);
-  return String(buf) + "+08:00";
+  char b[32];
+  strftime(b, sizeof(b), "%Y-%m-%dT%H:%M:%S", &t);
+  return String(b) + "+08:00";
 }
 
-// ---------- msg_id：uuid v4 ----------
-// 用硬件随机数生成，重启也不重复。服务端靠它做幂等去重。
 String uuid4() {
   uint8_t b[16];
   for (int i = 0; i < 16; i += 4) {
     uint32_t r = esp_random();
     memcpy(b + i, &r, 4);
   }
-  b[6] = (b[6] & 0x0F) | 0x40;      // version 4
-  b[8] = (b[8] & 0x3F) | 0x80;      // variant
+  b[6] = (b[6] & 0x0F) | 0x40;
+  b[8] = (b[8] & 0x3F) | 0x80;
   char s[37];
   snprintf(s, sizeof(s),
            "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
@@ -74,24 +108,42 @@ String uuid4() {
   return String(s);
 }
 
-// ---------- MQTT ----------
-void connectMQTT() {
-  Serial.print("MQTT");
-  while (!client.connect(NODE_ID)) {
-    Serial.print(".");
+// ---------- 非阻塞重连 ----------
+void ensureConnected() {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("[WiFi] lost, reconnect");
+    WiFi.reconnect();
     delay(1000);
+    return;
   }
-  Serial.println("  connected");
+  if (client.connected()) return;
+  if (millis() - lastTry < 5000) return;
+  lastTry = millis();
+
+  Serial.print("[MQTT] reconnect...");
+  if (client.connect(NODE_ID)) {
+    Serial.println(" ok");
+    flushBuffer();
+  } else {
+    Serial.println(" fail");
+  }
 }
 
 void setup() {
   Serial.begin(115200);
   delay(300);
   Serial.println();
-  Serial.println("=== 3.4 report ===");
+  Serial.println("=== 3.6 firmware (buffer + LED + buzzer) ===");
 
-  if (!connectWiFi()) return;
-  if (!syncTime())   return;
+  pinMode(LED_G, OUTPUT);
+  pinMode(LED_R, OUTPUT);
+  pinMode(BUZZER, OUTPUT);
+  digitalWrite(LED_R, LOW);
+  digitalWrite(BUZZER, LOW);
+  digitalWrite(LED_G, HIGH);          // 上电即绿灯 = 正常运行
+
+  connectWiFi();
+  syncTime();
 
   dht.begin();
   Wire.begin(21, 22);
@@ -100,16 +152,18 @@ void setup() {
   topic = String("iot/") + NODE_ID + "/data";
   client.begin(MQTT_HOST, MQTT_PORT, net);
   client.setKeepAlive(60);
-  connectMQTT();
+
+  if (client.connect(NODE_ID)) {
+    Serial.println("MQTT connected");
+    flushBuffer();
+  } else {
+    Serial.println("MQTT not connected, will retry in loop");
+  }
 }
 
 void loop() {
   client.loop();
-
-  if (!client.connected()) {
-    Serial.println("MQTT lost, reconnecting...");
-    connectMQTT();
-  }
+  ensureConnected();
 
   if (millis() - lastReport < REPORT_MS) {
     delay(50);
@@ -122,8 +176,20 @@ void loop() {
   float lux = lightMeter.readLightLevel();
 
   if (isnan(t) || isnan(h)) {
-    Serial.println("dht read failed, skip this round");
+    Serial.println("dht read failed, skip");
     return;
+  }
+
+  // ---- 本地告警：断网时云端判不了，蜂鸣器是唯一还能报警的通道 ----
+  bool hot = (t > TEMP_ALARM);
+  digitalWrite(LED_R, hot ? HIGH : LOW);
+  digitalWrite(LED_G, hot ? LOW  : HIGH);
+  digitalWrite(BUZZER, hot ? HIGH : LOW);
+
+  if (hot != lastHot) {
+    lastHot = hot;
+    if (hot) Serial.printf("[ALARM] ON   t=%.1f > %.1f\n", t, TEMP_ALARM);
+    else     Serial.println("[ALARM] OFF");
   }
 
   String payload = String("{\"id\":\"") + uuid4()
@@ -132,7 +198,12 @@ void loop() {
                  + ",\"h\":" + String(h, 1)
                  + ",\"lux\":" + String(lux, 1) + "}";
 
-  bool ok = client.publish(topic, payload, false, 1);   // QoS 1
-  Serial.print(ok ? "PUB OK   " : "PUB FAIL ");
-  Serial.println(payload);
+  if (client.connected() && client.publish(topic, payload, false, 1)) {
+    Serial.print("PUB OK  ");
+    Serial.println(payload);
+  } else {
+    Serial.print("PUB FAIL -> buffer  ");
+    Serial.println(payload.substring(0, 60));
+    bufPush(payload);
+  }
 }
