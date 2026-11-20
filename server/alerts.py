@@ -1,25 +1,25 @@
-"""告警引擎：规则判定 + 状态机 + 分级抑制。
+"""告警引擎：规则判定 + 状态机 + 分级抑制 + 持续提醒。
 
-实现前必须想清楚的四个问题（答案已定）：
+四个核心设计（面试会问，答案已定）：
 
 1. "连续 N 条"的计数存在哪？
-   答：内存 dict，key = (node_id, rule_id)。告警是流式实时判定，每条读数都要读写计数，
+   内存 dict，key=(node_id, rule_id)。告警是流式实时判定，每条读数都要读写计数，
    落库会拉高延迟；代价是进程重启丢状态（可做定时快照兜底，本版没做，写进"后续可做"）。
 
-2. 告警状态（normal / firing）怎么存？
-   答：和计数放在同一个 state 结构里：{"count": int, "status": "normal"|"firing"}。
+2. 告警状态怎么存？
+   {"count": int, "status": "normal"|"firing", "last_notify": datetime|None}
 
 3. 时段判断用 ts 还是 recv_ts？
-   答：用设备自带的 ts。网络抖动、排队延迟会让 recv_ts 失真；告警窗口描述的是
+   用设备自带的 ts。网络抖动、排队延迟会让 recv_ts 失真；告警窗口描述的是
    "设备采集那一刻，房间在不在使用时段"，不是"服务收到包的时刻"。
 
 4. 恢复判定：不满足 1 次就恢复，还是连续 N 次？
-   答：一次不满足就恢复。触发要防抖（连续 N 条命中），恢复不防抖
-   （工业告警的常规做法：宁可早恢复，也不要让告警挂着）。
+   一次不满足就恢复。触发要防抖（连续 N 条命中），恢复不防抖——
+   宁可早恢复，也不要让告警一直挂着。
 
-本版另外两条设计：
-5. 分级抑制：同一指标上，红级处于 firing 时，不再推该指标的黄级提示。
-6. 抑制只影响"推送"，不影响"判定"——黄级状态机照常流转，只是消息被过滤。
+另外两条：
+5. 分级抑制：同一指标上，红级 firing 时不推该指标的黄级提示。
+6. 抑制只影响"推送"，不影响"判定"——黄级状态机照常流转，消息被过滤而已。
 """
 
 from datetime import datetime
@@ -36,8 +36,10 @@ RULES = [
 # 输出里只有 rule id，需要反查指标（分级抑制用）
 RULE_METRIC = {r["id"]: r["metric"] for r in RULES}
 
+# 持续告警的重复提醒间隔（分钟）：红 60，黄 120
+REMIND_MIN = {"红": 60, "黄": 120}
+
 # 状态容器：key=(node_id, rule_id)
-# value: {"count": int, "status": "normal"|"firing"}
 _state: Dict[tuple, Dict[str, Any]] = {}
 
 
@@ -47,9 +49,7 @@ def reset_state():
 
 
 def in_window(window: str, ts: str) -> bool:
-    """window: "always" / "night"(22:30-07:00) / "day"(07:00-22:30)
-    ts 形如 "2026-11-20T14:00:00+08:00"
-    """
+    """window: "always" / "night"(22:30-07:00) / "day"(07:00-22:30)"""
     if window == "always":
         return True
 
@@ -82,15 +82,13 @@ def check_alerts(db, reading: dict) -> List[dict]:
     """检查一条 reading，返回需要推送的告警列表。
 
     返回项格式：
-        触发：{"rule": "R1", "level": "红", "msg": "..."}
+        触发：{"rule": "R1", "level": "红",   "msg": "..."}
+        提醒：{"rule": "R1", "level": "红",   "msg": "过热持续告警：已持续 65 分钟..."}
         恢复：{"rule": "R1", "level": "恢复", "msg": "..."}
-
-    reading 形如：
-        {"msg_id": "...", "node_id": "node01",
-         "ts": "2026-11-20T14:00:00+08:00", "t": 33.2, "h": 45.0, "lux": 120.0}
     """
     node_id = reading["node_id"]
     ts = reading["ts"]
+    now = datetime.fromisoformat(ts)
     out = []
 
     for rule in RULES:
@@ -112,20 +110,36 @@ def check_alerts(db, reading: dict) -> List[dict]:
         # ---- 状态机 ----
         state_key = (node_id, rid)
         if state_key not in _state:
-            _state[state_key] = {"count": 0, "status": "normal"}
+            _state[state_key] = {"count": 0, "status": "normal", "last_notify": None}
         st = _state[state_key]
         firing = st["status"] == "firing"
 
         if hit:
             st["count"] += 1
-            # 只在 normal -> firing 的跃迁瞬间推一次
+
             if not firing and st["count"] >= need:
+                # 首次触发：normal -> firing 的跃迁
                 st["status"] = "firing"
+                st["last_notify"] = now
                 out.append({
                     "rule": rid,
                     "level": level,
                     "msg": f"{name}：{metric}={val}，阈值 {rule['th']}，连续 {st['count']} 次",
                 })
+
+            elif firing:
+                # 已告警中：只在超过提醒间隔时再推一次
+                last = st.get("last_notify")
+                if last is not None:
+                    elapsed_min = int((now - last).total_seconds() // 60)
+                    if elapsed_min >= REMIND_MIN[level]:
+                        st["last_notify"] = now
+                        out.append({
+                            "rule": rid,
+                            "level": level,
+                            "msg": f"{name}持续告警：已持续 {elapsed_min} 分钟，"
+                                   f"当前 {metric}={val}（阈值 {rule['th']}）",
+                        })
         else:
             if firing:
                 out.append({
@@ -134,6 +148,7 @@ def check_alerts(db, reading: dict) -> List[dict]:
                     "msg": f"{name}已恢复，当前 {metric}={val}",
                 })
                 st["status"] = "normal"
+                st["last_notify"] = None
             st["count"] = 0
 
     # ---- 分级抑制：同一指标上，红级 firing 时不推黄级 ----
