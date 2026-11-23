@@ -15,7 +15,8 @@ import paho.mqtt.client as mqtt
 from fastapi import Depends, FastAPI, HTTPException, Query
 
 from storage import connect, init_db, insert_reading, latest, query_series, stats
-
+from alerts import check_alerts
+from notifier import send_alert
 BROKER = "127.0.0.1"
 PORT = 1883
 TOPIC = "iot/+/data"
@@ -52,6 +53,16 @@ def start_mqtt():
                                 d.get("t"), d.get("h"), d.get("lux"))
             print(f"[{'NEW' if ok else 'DUP'}] {node} "
                   f"t={d.get('t')} h={d.get('h')} lux={d.get('lux')}")
+            import time
+            for a in check_alerts(thread_db(), {
+                "msg_id": d["id"], "node_id": node, "ts": d["ts"],
+                "t": d.get("t"), "h": d.get("h"), "lux": d.get("lux"),
+            }):
+                t0 = time.time()
+                sent = send_alert(a["level"], a["msg"])
+                cost = (time.time() - t0) * 1000
+                print(f"[ALERT] {a['level']} {a['rule']} sent={sent} "
+                      f"cost={cost:.0f}ms | {a['msg']}")
         except Exception as e:
             print(f"[error] {e} | {msg.payload[:120]}")
 
