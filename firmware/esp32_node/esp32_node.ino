@@ -1,5 +1,6 @@
 #include <WiFi.h>
 #include <time.h>
+#include <sys/time.h>
 #include <MQTT.h>
 #include <Wire.h>
 #include <BH1750.h>
@@ -79,13 +80,10 @@ void drawScreen(float t, float h, float lux) {
 
   display.setCursor(0, 16);
   display.print(l1);
-
   display.setCursor(0, 28);
   display.print(l2);
-
   display.setCursor(0, 40);
   display.print(client.connected() ? "MQTT OK" : "MQTT --");
-
   display.setCursor(0, 52);
   display.print(l3);
 
@@ -121,12 +119,22 @@ bool syncTime() {
   return now >= 1700000000;
 }
 
+// 带毫秒的 ISO8601：2026-11-23T16:20:05.123+08:00
+// 为什么必须带毫秒：端到端延迟是毫秒级指标，秒级时间戳会把延迟量化成 1 秒的桶
 String isoNow() {
+  struct timeval tv;
+  gettimeofday(&tv, nullptr);
+
+  time_t now = tv.tv_sec;
   struct tm t;
-  if (!getLocalTime(&t, 1000)) return String("(no time)");
+  localtime_r(&now, &t);
+
   char b[32];
   strftime(b, sizeof(b), "%Y-%m-%dT%H:%M:%S", &t);
-  return String(b) + "+08:00";
+
+  char ms[12];
+  snprintf(ms, sizeof(ms), ".%03d+08:00", (int)(tv.tv_usec / 1000));
+  return String(b) + ms;
 }
 
 String uuid4() {
