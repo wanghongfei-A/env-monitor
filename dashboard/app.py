@@ -32,7 +32,9 @@ def api_get(path: str, params: dict | None = None):
 
 
 def to_local(s: str) -> datetime:
-    return pd.to_datetime(s).tz_convert("Asia/Shanghai")
+    # format="ISO8601"：库里混着两种精度的时间戳（旧数据无毫秒，新固件带毫秒），
+    # pandas 3.x 默认要求整列格式一致，不指定就会 ValueError: time data ... doesn't match format
+    return pd.to_datetime(s, format="ISO8601", utc=True).tz_convert("Asia/Shanghai")
 
 
 # ---------------- 侧边栏 ----------------
@@ -71,7 +73,7 @@ st.subheader(f"最近 {hours} 小时曲线")
 
 if series and series["items"]:
     df = pd.DataFrame(series["items"])
-    df["ts"] = pd.to_datetime(df["ts"]).dt.tz_convert("Asia/Shanghai")
+    df["ts"] = pd.to_datetime(df["ts"], format="ISO8601", utc=True).dt.tz_convert("Asia/Shanghai")
     df = df.sort_values("ts")
 
     # 温湿度双轴
@@ -114,7 +116,7 @@ if alerts and alerts["items"]:
         adf = adf[adf["ack"] == 0]
 
     adf = adf[["ts", "level", "rule_id", "kind", "msg", "ack"]].copy()
-    adf["ts"] = pd.to_datetime(adf["ts"]).dt.tz_convert("Asia/Shanghai").dt.strftime("%m-%d %H:%M:%S")
+    adf["ts"] = pd.to_datetime(adf["ts"], format="ISO8601", utc=True).dt.tz_convert("Asia/Shanghai").dt.strftime("%m-%d %H:%M:%S")
     adf["ack"] = adf["ack"].map({0: "未处理", 1: "已处理"})
     adf.columns = ["时间", "级别", "规则", "类型", "内容", "状态"]
 
