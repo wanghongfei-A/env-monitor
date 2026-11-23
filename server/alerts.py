@@ -20,7 +20,7 @@ RULES = [
     dict(id="R1", name="过热",  metric="t",  op=">", th=32.0, need=18, window="always", level="红"),
     dict(id="R2", name="过冷",  metric="t",  op="<", th=20.0, need=30, window="night",  level="红"),
     dict(id="R3", name="潮湿",  metric="h",  op=">", th=85.0, need=30, window="always", level="红"),
-    dict(id="R4", name="忘关灯", metric="lux", op=">", th=100.0, need=60, window="night", level="红"),
+    dict(id="R4", name="忘关灯", metric="lux", op=">", th=50.0, need=60, window="night", level="红"),
     dict(id="R5", name="舒适度", metric="t",  op=">", th=28.0, need=60, window="day",    level="黄"),
 ]
 
