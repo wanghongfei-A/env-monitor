@@ -3,20 +3,24 @@
 # 启动（项目根目录）：
 #   .\.venv\Scripts\python.exe -m uvicorn main:app --app-dir server --host 127.0.0.1 --port 8000
 #
-# 两个要点：
+# 三个要点：
 # 1. FastAPI 0.163 已弃用 @app.on_event，改用 lifespan
 # 2. SQLite 连接不能跨线程：MQTT 回调用 thread_db()，HTTP 用 Depends(get_db)
+# 3. 告警落库（alert 表）后再推钉钉，推送失败不影响入库
 
 import json
 import threading
+import time
 from contextlib import asynccontextmanager
 
 import paho.mqtt.client as mqtt
 from fastapi import Depends, FastAPI, HTTPException, Query
 
-from storage import connect, init_db, insert_reading, latest, query_series, stats
 from alerts import check_alerts
 from notifier import send_alert
+from storage import (connect, init_db, insert_reading, insert_alert,
+                     latest, query_series, query_alerts, stats)
+
 BROKER = "127.0.0.1"
 PORT = 1883
 TOPIC = "iot/+/data"
@@ -49,20 +53,27 @@ def start_mqtt():
         try:
             d = json.loads(msg.payload.decode("utf-8"))
             node = msg.topic.split("/")[1]
-            ok = insert_reading(thread_db(), d["id"], node, d["ts"],
+            db = thread_db()
+
+            ok = insert_reading(db, d["id"], node, d["ts"],
                                 d.get("t"), d.get("h"), d.get("lux"))
             print(f"[{'NEW' if ok else 'DUP'}] {node} "
                   f"t={d.get('t')} h={d.get('h')} lux={d.get('lux')}")
-            import time
-            for a in check_alerts(thread_db(), {
+
+            for a in check_alerts(db, {
                 "msg_id": d["id"], "node_id": node, "ts": d["ts"],
                 "t": d.get("t"), "h": d.get("h"), "lux": d.get("lux"),
             }):
+                # 先落库：推送失败也不丢告警记录
+                insert_alert(db, a["rule"], a["level"], a["kind"], a["msg"],
+                             d["ts"], d.get("t"), d.get("h"), d.get("lux"))
+
                 t0 = time.time()
                 sent = send_alert(a["level"], a["msg"])
                 cost = (time.time() - t0) * 1000
-                print(f"[ALERT] {a['level']} {a['rule']} sent={sent} "
+                print(f"[ALERT] {a['level']} {a['rule']} {a['kind']} sent={sent} "
                       f"cost={cost:.0f}ms | {a['msg']}")
+
         except Exception as e:
             print(f"[error] {e} | {msg.payload[:120]}")
 
@@ -116,6 +127,18 @@ def api_series(
 @app.get("/api/stats")
 def api_stats(node: str | None = None, day: str | None = None, db=Depends(get_db)):
     return stats(db, node, day)
+
+
+@app.get("/api/alerts")
+def api_alerts(
+    limit: int = Query(100, le=1000),
+    level: str | None = None,
+    since: str | None = None,
+    db=Depends(get_db),
+):
+    return {"items": query_alerts(db, limit, level, since)}
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="127.0.0.1", port=8000)

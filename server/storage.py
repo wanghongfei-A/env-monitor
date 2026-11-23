@@ -24,6 +24,20 @@ CREATE TABLE IF NOT EXISTS reading (
     h       REAL,
     lux     REAL
 );
+CREATE TABLE IF NOT EXISTS alert (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    rule_id   TEXT NOT NULL,
+    level     TEXT NOT NULL,
+    kind      TEXT NOT NULL,              -- trigger / remind / recover
+    msg       TEXT NOT NULL,
+    ts        TEXT NOT NULL,              -- 触发时的设备时间
+    t_value   REAL,
+    h_value   REAL,
+    lux_value REAL,
+    ack       INTEGER NOT NULL DEFAULT 0, -- 0=未处理 1=已处理
+    ack_ts    TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_alert_ts ON alert(ts);
 """
 
 
@@ -104,6 +118,31 @@ def stats(conn, node_id=None, day=None):
 
     return dict(row)
 
+def insert_alert(conn, rule_id, level, kind, msg, ts,
+                 t=None, h=None, lux=None) -> int:
+    """写入一条告警，返回新行 id"""
+    cur = conn.execute(
+        "INSERT INTO alert (rule_id, level, kind, msg, ts, t_value, h_value, lux_value) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (rule_id, level, kind, msg, ts, t, h, lux),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def query_alerts(conn, limit=100, level=None, since_ts=None):
+    """查告警历史，按 ts 倒序"""
+    sql = "SELECT * FROM alert WHERE 1=1"
+    args = []
+    if level:
+        sql += " AND level = ?"
+        args.append(level)
+    if since_ts:
+        sql += " AND ts >= ?"
+        args.append(since_ts)
+    sql += " ORDER BY ts DESC, id DESC LIMIT ?"
+    args.append(limit)
+    return [dict(r) for r in conn.execute(sql, args)]
 
 if __name__ == "__main__":
     # 自测用内存库：不读也不改 data/iot.db

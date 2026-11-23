@@ -13,6 +13,7 @@ SQLAlchemy==2.1.9
 pandas==3.1.1
 streamlit==1.67.0
 requests==2.34.2
+plotly==7.1.0
 
 # 环境：Python 3.13.17 / Windows 11 / 2026-11-18 实测
 # 完整锁定（含所有间接依赖）用：.\.venv\Scripts\python.exe -m pip freeze > requirements.lock.txt
