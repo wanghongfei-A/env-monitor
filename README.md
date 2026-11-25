@@ -115,6 +115,34 @@ cd <项目根目录>
 
 > 用树莓派 / 另一台电脑演示时，把 `secrets.h` 里的 `MQTT_HOST` 改成 broker 所在机器的局域网 IP 即可。
 
+### 3.1 长期运行（脱离终端）
+
+实测教训：服务跑在前台终端窗口里时，**关窗口 = 杀进程**（7 天验证第一天因此中断 20.7 小时）。
+所以正式跑用后台方式：
+
+```powershell
+# 启动（无窗口，日志写 logs\server.log）
+wscript.exe "scripts\run_server_hidden.vbs"
+
+# 停止
+scripts\stop_server.bat
+```
+
+开机自启：把 `run_server_hidden.vbs` 的快捷方式放进 `shell:startup` 文件夹，登录后自动后台运行。
+
+> `.bat` / `.vbs` 保持纯 ASCII——批处理里写中文 + `chcp` 会让后半段变成乱码命令。
+
+### 3.2 停止与拆除（验证结束后）
+
+| 步骤 | 操作 |
+|---|---|
+| 1. 停服务 | `scripts\stop_server.bat` |
+| 2. 取消开机自启 | 删除 `shell:startup` 里的 `env-monitor.lnk` |
+| 3. 停 broker | `cd D:\develop\emqx\bin; .\emqx.cmd stop` |
+| 4. 断开设备 | 拔掉 ESP32 的 USB |
+| 5. 恢复电源策略 | `powercfg /restoredefaultschemes` |
+| 6. 保留数据 | `data\iot.db` 与 `logs\` 不要删（复现与截图要用） |
+
 ## 4. 指标实测
 
 九项验收指标与测量方法见 [docs/验收数据.md](docs/验收数据.md)。**最关键的三个数**：
